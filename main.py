@@ -183,7 +183,7 @@ async def set_commands(app):
     await app.bot.set_my_commands([
         ('start','Start the bot'),
         ('schedule','Make a booking'),
-        ('my Bookings','View your bookings'),
+        ('mybookings','View your bookings'),
         ('cancel','Cancel current action')
     ])
 
