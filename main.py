@@ -181,10 +181,10 @@ def next_n_sunthu(n:int=10):
 # --- Bot handlers ---
 async def set_commands(app):
     await app.bot.set_my_commands([
-        ('ابدأ','Start the bot'),
-        ('حجز موعد','Make a booking'),
-        ('مواعيدي','View your bookings'),
-        ('الغاء الموعد','Cancel current action')
+        ('Start','Start the bot'),
+        ('Schedule','Make a booking'),
+        ('My Bookings','View your bookings'),
+        ('Cancel','Cancel current action')
     ])
 
 async def start(update:Update, context:ContextTypes.DEFAULT_TYPE):
