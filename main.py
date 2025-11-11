@@ -203,7 +203,7 @@ async def receive_file_count(update:Update, context:ContextTypes.DEFAULT_TYPE):
         if count < 1:
             raise ValueError()
     except Exception:
-        await update.message.reply_text("Please enter a valid number (1 or more).)
+        await update.message.reply_text("Please enter a valid number (1 or more).")
         return ASK_FILE_COUNT
     context.user_data['file_count'] = count
     context.user_data['received_files'] = []
