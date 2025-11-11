@@ -188,7 +188,7 @@ async def set_commands(app):
     ])
 
 async def start(update:Update, context:ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(" اهلا بك  — يمكنك حجز موعد لتقديم طلبك الأن برجاء الضغط علي زر MENU للبدء")
+    await update.message.reply_text(" اهلا بك في هيئة الدواء المصرية فرع لمنيا  — يمكنك حجز موعد لتقديم طلبك الأن برجاء الضغط علي زر MENU للبدء")
 
 
 async def schedule_start(update:Update, context:ContextTypes.DEFAULT_TYPE):
