@@ -181,14 +181,14 @@ def next_n_sunthu(n:int=10):
 # --- Bot handlers ---
 async def set_commands(app):
     await app.bot.set_my_commands([
-        ('start','Start the bot'),
-        ('schedule','Make a booking'),
-        ('mybookings','View your bookings'),
-        ('cancel','Cancel current action')
+        ('start','إبدأ من جديد'),
+        ('schedule','حجز موعد'),
+        ('mybookings','عرض مواعيدي'),
+        ('cancel','الغاء العملية الحالية')
     ])
 
 async def start(update:Update, context:ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("اهلا بك  — يمكنك حجز موعد لتقديم طلبك الان")
+    await update.message.reply_text(" اهلا بك  — يمكنك حجز موعد لتقديم طلبك الأن برجاء الضغط علي زر MENU للبدء")
 
 
 async def schedule_start(update:Update, context:ContextTypes.DEFAULT_TYPE):
@@ -271,10 +271,19 @@ async def receive_file(update:Update, context:ContextTypes.DEFAULT_TYPE):
     keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Approve", callback_data=f"approve:{booking_id}"), InlineKeyboardButton("Reject", callback_data=f"reject:{booking_id}" )]])
     for admin_id in ADMIN_IDS:
         try:
+            # send files first
+            for fid, ftype, fname in files:
+                if ftype == "photo":
+                    await context.bot.send_photo(chat_id=admin_id, photo=fid, caption=fname)
+                else:
+                    await context.bot.send_document(chat_id=admin_id, document=fid, filename=fname)
+            
+            # send text + buttons
             msg = await context.bot.send_message(chat_id=admin_id, text=caption, reply_markup=keyboard)
             save_admin_message(booking_id, admin_id, msg.message_id)
         except Exception as e:
             logger.exception("Failed to send booking %s to admin %s: %s", booking_id, admin_id, e)
+
     await update.message.reply_text("في انتظار موافقة المسئولين لتأكيد طلبك")
     return ConversationHandler.END
 
