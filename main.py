@@ -1,21 +1,5 @@
 """
-Telegram Scheduling Bot (Inline Date Buttons)
-Features:
-- Schedule Sun-Thu only
-- Must schedule at least 2 days in advance
-- Max 10 people per day
-- User must upload a document (file/photo)
-- Booking is sent to ADMIN_ID for final approval (Approve / Reject)
-
-Requirements:
-- python-telegram-bot>=20.3
-- sqlite3 (built-in)
-
-Config via environment variables:
-- BOT_TOKEN
-- ADMIN_ID (integer Telegram user id)
-
-Run: python main.py
+Telegram Scheduling Bot with file count and date buttons
 """
 
 import os
@@ -34,12 +18,9 @@ from telegram.ext import (
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 ADMIN_ID = int(os.environ.get('ADMIN_ID') or 0)
 DB_PATH = os.environ.get('DB_PATH', 'bookings.db')
-FILES_DIR = os.environ.get('FILES_DIR', 'uploaded_docs')
 
 if not BOT_TOKEN or not ADMIN_ID:
     raise RuntimeError('Please set BOT_TOKEN and ADMIN_ID environment variables')
-
-os.makedirs(FILES_DIR, exist_ok=True)
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -48,10 +29,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- Conversation states ---
-ASK_DATE, ASK_DOC = range(2)
+ASK_FILE_COUNT, ASK_DATE, ASK_DOC = range(3)
 
 # --- Database helpers ---
-
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -62,26 +42,45 @@ def init_db():
             username TEXT,
             date TEXT NOT NULL,
             status TEXT NOT NULL,
-            doc_file_id TEXT,
-            doc_file_name TEXT,
             created_at TEXT NOT NULL
+        )
+    ''')
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS booking_files (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            booking_id INTEGER NOT NULL,
+            file_id TEXT NOT NULL,
+            file_type TEXT NOT NULL,
+            file_name TEXT,
+            FOREIGN KEY(booking_id) REFERENCES bookings(id)
         )
     ''')
     conn.commit()
     conn.close()
 
 
-def add_booking(user_id, username, date_str, doc_file_id, doc_file_name):
+def add_booking(user_id, username, date_str):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute('''
-        INSERT INTO bookings (user_id, username, date, status, doc_file_id, doc_file_name, created_at)
-        VALUES (?, ?, ?, 'PENDING', ?, ?, ?)
-    ''', (user_id, username, date_str, doc_file_id, doc_file_name, datetime.utcnow().isoformat()))
+        INSERT INTO bookings (user_id, username, date, status, created_at)
+        VALUES (?, ?, ?, 'PENDING', ?)
+    ''', (user_id, username, date_str, datetime.utcnow().isoformat()))
     booking_id = cur.lastrowid
     conn.commit()
     conn.close()
     return booking_id
+
+
+def add_booking_file(booking_id, file_id, file_type, file_name):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute('''
+        INSERT INTO booking_files (booking_id, file_id, file_type, file_name)
+        VALUES (?, ?, ?, ?)
+    ''', (booking_id, file_id, file_type, file_name))
+    conn.commit()
+    conn.close()
 
 
 def count_bookings_for_date(date_str):
@@ -96,7 +95,7 @@ def count_bookings_for_date(date_str):
 def get_pending_bookings():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
-    cur.execute("SELECT id, user_id, username, date, doc_file_id, doc_file_name FROM bookings WHERE status = 'PENDING'")
+    cur.execute("SELECT id, user_id, username, date FROM bookings WHERE status = 'PENDING'")
     rows = cur.fetchall()
     conn.close()
     return rows
@@ -113,10 +112,19 @@ def set_booking_status(booking_id, status):
 def get_booking(booking_id):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
-    cur.execute("SELECT id, user_id, username, date, status, doc_file_id, doc_file_name FROM bookings WHERE id = ?", (booking_id,))
+    cur.execute("SELECT id, user_id, username, date, status FROM bookings WHERE id = ?", (booking_id,))
     row = cur.fetchone()
     conn.close()
     return row
+
+
+def get_booking_files(booking_id):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("SELECT file_id, file_type, file_name FROM booking_files WHERE booking_id = ?", (booking_id,))
+    rows = cur.fetchall()
+    conn.close()
+    return rows
 
 
 def user_bookings(user_id):
@@ -128,216 +136,209 @@ def user_bookings(user_id):
     return rows
 
 # --- Helpers ---
-
 def is_allowed_weekday(dt):
-    # Python weekday(): Mon=0 Sun=6; we allow Sun–Thu (6,0,1,2,3)
-    return dt.weekday() in (6, 0, 1, 2, 3)
+    # Sun=6, Mon=0 ... Thu=3
+    return dt.weekday() in (6,0,1,2,3)
+
 
 # --- Handlers ---
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Welcome! Use /schedule to make a booking (Sun–Thu).\nCommands:\n"
+        "Welcome! Use /schedule to make a booking (Sun–Thu).\n"
+        "Commands:\n"
         "/schedule - start booking\n"
         "/mybookings - view your bookings\n"
         "/pending - view pending bookings (admin)"
     )
 
-# --- New: show inline date buttons ---
+
 async def schedule_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "How many files/photos do you want to attach for this booking?"
+    )
+    return ASK_FILE_COUNT
+
+
+async def receive_file_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        count = int(update.message.text)
+        if count < 1:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("Please enter a valid number (1 or more).")
+        return ASK_FILE_COUNT
+
+    context.user_data['file_count'] = count
+    context.user_data['received_files'] = []
+
+    # show date buttons (next 2 weeks, skipping too soon)
     today = datetime.utcnow().date()
-    dates = []
     min_allowed = today + timedelta(days=2)
-    for i in range(2, 16):  # start from 2 days ahead
+    dates = []
+    for i in range(2, 16):
         dt = today + timedelta(days=i)
         if dt >= min_allowed and is_allowed_weekday(dt):
             dates.append(dt)
 
-
-    keyboard = []
-    row = []
-    for idx, dt in enumerate(dates):
-        btn = InlineKeyboardButton(dt.isoformat(), callback_data=f'date:{dt.isoformat()}')
-        row.append(btn)
-        if len(row) == 2:
-            keyboard.append(row)
-            row = []
-    if row:
-        keyboard.append(row)
-
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(
-        "Please choose a booking date (Sun–Thu, at least 2 days in advance):",
-        reply_markup=reply_markup
-    )
+    buttons = [[InlineKeyboardButton(d.isoformat(), callback_data=f'date:{d.isoformat()}')] for d in dates]
+    await update.message.reply_text("Select a booking date:", reply_markup=InlineKeyboardMarkup(buttons))
     return ASK_DATE
 
-# --- New: receive selected date from button ---
+
 async def receive_date_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
     if not data.startswith('date:'):
-        await query.edit_message_text("Invalid selection. Please try again.")
-        return ASK_DATE
+        await query.edit_message_text("Invalid selection.")
+        return ConversationHandler.END
 
     date_str = data.split(':')[1]
     dt = datetime.strptime(date_str, '%Y-%m-%d').date()
-
     min_allowed = datetime.utcnow().date() + timedelta(days=2)
-    if dt < min_allowed:
-        await query.edit_message_text(
-            "Date too soon. Please run /schedule again and select a valid date."
-        )    
+    if dt < min_allowed or not is_allowed_weekday(dt):
+        await query.edit_message_text("Date not allowed. Start again with /schedule.")
         return ConversationHandler.END
 
-    
-
-    # enforce 2-day advance
-    if dt < (datetime.utcnow().date() + timedelta(days=2)):
-        await query.edit_message_text("Date too soon. Please choose a date at least 2 days in advance.")
-        return ASK_DATE
-
-    # enforce max 10 per day
     if count_bookings_for_date(date_str) >= 10:
-        await query.edit_message_text("Sorry, that date is fully booked. Please choose another date.")
-        return ASK_DATE
+        await query.edit_message_text("Sorry, that date is fully booked. Start again with /schedule.")
+        return ConversationHandler.END
 
     context.user_data['chosen_date'] = date_str
-    await query.edit_message_text(
-        f"Great — you selected {date_str}.\n"
-        "Now please upload the document you want to attach (photo or file)."
-    )
+    await query.edit_message_text(f"Great! Now please send {context.user_data['file_count']} file(s)/photo(s).")
     return ASK_DOC
 
-# --- Document upload & admin approval (same as before) ---
+
 async def receive_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
-    date_str = context.user_data.get('chosen_date')
-    if not date_str:
-        await update.message.reply_text('Date missing. Please run /schedule again.')
-        return ConversationHandler.END
-
     file_id = None
     file_name = None
+    file_type = None
 
     if update.message.document:
         file_id = update.message.document.file_id
         file_name = update.message.document.file_name
+        file_type = 'document'
     elif update.message.photo:
         file = update.message.photo[-1]
         file_id = file.file_id
         file_name = f'photo_{user.id}_{int(datetime.utcnow().timestamp())}.jpg'
+        file_type = 'photo'
     else:
-        await update.message.reply_text('Please send a file or photo as the document.')
+        await update.message.reply_text("Please send a file or photo.")
         return ASK_DOC
 
-    booking_id = add_booking(user.id, user.username or '', date_str, file_id, file_name)
+    context.user_data['received_files'].append((file_id, file_type, file_name))
+    remaining = context.user_data['file_count'] - len(context.user_data['received_files'])
+    if remaining > 0:
+        await update.message.reply_text(f"Received. Send {remaining} more file(s).")
+        return ASK_DOC
 
-    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-    keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton('Approve', callback_data=f'approve:{booking_id}'),
-        InlineKeyboardButton('Reject', callback_data=f'reject:{booking_id}')
-    ]])
+    # all files received -> create booking
+    booking_id = add_booking(user.id, user.username or '', context.user_data['chosen_date'])
+    for f_id, f_type, f_name in context.user_data['received_files']:
+        add_booking_file(booking_id, f_id, f_type, f_name)
 
-    caption = f'New booking #{booking_id}\nUser: {user.full_name} (@{user.username})\nUserID: {user.id}\nDate: {date_str}'
+    # send to admin
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("Approve", callback_data=f"approve:{booking_id}"),
+         InlineKeyboardButton("Reject", callback_data=f"reject:{booking_id}")]
+    ])
+    caption = f"New booking #{booking_id}\nUser: {user.full_name} (@{user.username})\nUserID: {user.id}\nDate: {context.user_data['chosen_date']}"
 
     try:
         await context.bot.send_message(chat_id=ADMIN_ID, text=caption)
-        await context.bot.send_document(chat_id=ADMIN_ID, document=file_id, filename=file_name, reply_markup=keyboard)
+        for f_id, f_type, f_name in context.user_data['received_files']:
+            if f_type == 'photo':
+                await context.bot.send_photo(chat_id=ADMIN_ID, photo=f_id, reply_markup=keyboard)
+            else:
+                await context.bot.send_document(chat_id=ADMIN_ID, document=f_id, reply_markup=keyboard)
     except Exception as e:
-        logger.exception('Failed to send to admin: %s', e)
-        await update.message.reply_text('Failed to send booking to admin. Please contact support.')
+        logger.exception("Failed to send to admin: %s", e)
+        await update.message.reply_text("Failed to send booking to admin. Please contact support.")
         return ConversationHandler.END
 
-    await update.message.reply_text(
-        'Your booking has been submitted and is pending admin approval. '
-        'You will be notified when it is approved or rejected.'
-    )
+    await update.message.reply_text("Booking submitted! Admin will approve/reject it.")
     return ConversationHandler.END
 
-# --- Admin approve/reject ---
+
 async def approve_reject_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    data = query.data
-    if not data:
-        return
-
-    action, booking_id_str = data.split(':')
-    booking_id = int(booking_id_str)
+    action, booking_id = query.data.split(':')
+    booking_id = int(booking_id)
     booking = get_booking(booking_id)
     if not booking:
-        await query.edit_message_text('Booking not found (maybe deleted).')
+        await query.edit_message_text("Booking not found.")
         return
 
-    _, user_id, username, date_str, status, doc_file_id, doc_file_name = booking
+    _, user_id, username, date_str, status = booking
 
     if action == 'approve':
         if count_bookings_for_date(date_str) >= 10:
             set_booking_status(booking_id, 'REJECTED')
-            await context.bot.send_message(chat_id=ADMIN_ID, text=f'Cannot approve #{booking_id}: date {date_str} full. Marked REJECTED.')
-            await context.bot.send_message(chat_id=user_id, text=f'Your booking #{booking_id} for {date_str} was rejected: date full.')
-            await query.edit_message_text(f'Booking #{booking_id} rejected automatically (date full).')
+            await context.bot.send_message(chat_id=user_id, text=f"Your booking #{booking_id} rejected: date full.")
+            await query.edit_message_text(f"Booking #{booking_id} rejected automatically: date full.")
             return
         set_booking_status(booking_id, 'APPROVED')
-        await context.bot.send_message(chat_id=user_id, text=f'Your booking #{booking_id} for {date_str} has been APPROVED.')
-        await query.bot.send_message(chat_id=ADMIN_ID, text=f'Booking #{booking_id} APPROVED.')
-        await query.edit_message_text(f'Booking #{booking_id} APPROVED.')
-    elif action == 'reject':
+        await context.bot.send_message(chat_id=user_id, text=f"Your booking #{booking_id} for {date_str} has been APPROVED.")
+        await query.edit_message_text(f"Booking #{booking_id} APPROVED.")
+    else:
         set_booking_status(booking_id, 'REJECTED')
-        await context.bot.send_message(chat_id=user_id, text=f'Your booking #{booking_id} for {date_str} has been REJECTED by admin.')
-        await query.edit_message_text(f'Booking #{booking_id} REJECTED.')
+        await context.bot.send_message(chat_id=user_id, text=f"Your booking #{booking_id} for {date_str} has been REJECTED.")
+        await query.edit_message_text(f"Booking #{booking_id} REJECTED.")
 
-# --- User bookings ---
+
 async def mybookings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     rows = user_bookings(user.id)
     if not rows:
-        await update.message.reply_text('You have no bookings.')
+        await update.message.reply_text("You have no bookings.")
         return
+    text = "\n".join(f"#{bid} — {date_str} — {status}" for bid, date_str, status in rows)
+    await update.message.reply_text(text)
 
-    lines = [f'#{bid} — {date_str} — {status}' for bid, date_str, status in rows]
-    await update.message.reply_text('\n'.join(lines))
 
-# --- Admin pending ---
 async def pending_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id != ADMIN_ID:
-        await update.message.reply_text('Unauthorized')
+        await update.message.reply_text("Unauthorized")
         return
     rows = get_pending_bookings()
     if not rows:
-        await update.message.reply_text('No pending bookings.')
+        await update.message.reply_text("No pending bookings.")
         return
-
-    for bid, user_id, username, date_str, doc_file_id, doc_file_name in rows:
-        caption = f'Pending #{bid}\nUser: {username} (id: {user_id})\nDate: {date_str}\n'
-        keyboard = InlineKeyboardMarkup([[
-            InlineKeyboardButton('Approve', callback_data=f'approve:{bid}'),
-            InlineKeyboardButton('Reject', callback_data=f'reject:{bid}')
-        ]])
+    for bid, user_id, username, date_str in rows:
+        files = get_booking_files(bid)
+        caption = f"Pending #{bid}\nUser: {username} (id: {user_id})\nDate: {date_str}\n"
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Approve", callback_data=f"approve:{bid}"),
+                                          InlineKeyboardButton("Reject", callback_data=f"reject:{bid}")]])
         await context.bot.send_message(chat_id=ADMIN_ID, text=caption)
-        await context.bot.send_document(chat_id=ADMIN_ID, document=doc_file_id, filename=doc_file_name, reply_markup=keyboard)
+        for f_id, f_type, f_name in files:
+            if f_type == 'photo':
+                await context.bot.send_photo(chat_id=ADMIN_ID, photo=f_id, reply_markup=keyboard)
+            else:
+                await context.bot.send_document(chat_id=ADMIN_ID, document=f_id, reply_markup=keyboard)
 
-# --- Cancel / unknown ---
+
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text('Booking canceled.')
+    await update.message.reply_text("Booking canceled.")
     return ConversationHandler.END
 
-async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text('Sorry, I did not understand that command.')
 
-# --- Main ---
+async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Sorry, I did not understand that command.")
+
+
 def main():
     init_db()
-
     app = Application.builder().token(BOT_TOKEN).build()
 
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler('schedule', schedule_start)],
         states={
+            ASK_FILE_COUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_file_count)],
             ASK_DATE: [CallbackQueryHandler(receive_date_button, pattern=r'^date:')],
-            ASK_DOC: [MessageHandler((filters.Document.ALL | filters.PHOTO) & ~filters.COMMAND, receive_document)]
+            ASK_DOC: [MessageHandler((filters.Document.ALL | filters.PHOTO) & ~filters.COMMAND, receive_document)],
         },
         fallbacks=[CommandHandler('cancel', cancel)],
     )
@@ -346,11 +347,21 @@ def main():
     app.add_handler(conv_handler)
     app.add_handler(CommandHandler('mybookings', mybookings))
     app.add_handler(CommandHandler('pending', pending_admin))
-    app.add_handler(CallbackQueryHandler(approve_reject_callback))
+    app.add_handler(CallbackQueryHandler(approve_reject_callback, pattern=r'^(approve|reject):'))
     app.add_handler(MessageHandler(filters.COMMAND, unknown))
 
-    logger.info('Bot starting...')
+    # set commands for Telegram UI
+    app.bot.set_my_commands([
+        ('start', 'Start the bot'),
+        ('schedule', 'Make a booking'),
+        ('mybookings', 'View your bookings'),
+        ('pending', 'View pending bookings (admin only)'),
+        ('cancel', 'Cancel current action')
+    ])
+
+    logger.info("Bot starting...")
     app.run_polling()
+
 
 if __name__ == '__main__':
     main()
