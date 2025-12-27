@@ -184,7 +184,7 @@ def count_user_bookings_for_date(user_id:int, date_str:str, status=None):
 def next_available_date():
     """Return the earliest Sun–Thu date starting 6 days from today with <15 approved bookings."""
     today = datetime.utcnow().date()
-    d = today + timedelta(days=23)
+    d = today + timedelta(days=25)
     while True:
         if d.weekday() in (6,0,1,2,3):  # Sun–Thu
             if count_approved_for_date(d.isoformat()) < 15:
