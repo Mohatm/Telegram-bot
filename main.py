@@ -170,8 +170,11 @@ async def receive_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ASK_DATE
 
     today = datetime.utcnow().date()
-    skip_days = days_until_start()
-    min_allowed = today + timedelta(days=skip_days)
+    start_date = datetime(2026, 1, 21).date()
+    
+    skip_days = max((start_date - today).days, 0)
+    min_allowed = max(today + timedelta(days=skip_days), start_date)
+    
 
     if dt.date() < min_allowed:
         await update.message.reply_text(
