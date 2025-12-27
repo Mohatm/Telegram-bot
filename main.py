@@ -167,7 +167,7 @@ def next_available_date():
     today = datetime.utcnow().date()
 
     # Start 6 days from today
-    d = today + timedelta(days=6)
+    d = today + timedelta(days=20)
 
     while True:
         # Sun=6, Mon=0, Tue=1, Wed=2, Thu=3
