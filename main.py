@@ -1,5 +1,5 @@
 """
-Telegram Scheduling Bot — Auto Date Assignment with Per-Day Limits
+Telegram Scheduling Bot — PostgreSQL Version
 Features:
 - Multi-admin approval (ADMIN_IDS env var, comma-separated)
 - Users choose option (فتح — غلق) and provide scheduler info
@@ -7,15 +7,16 @@ Features:
 - Admin approve / reject flow
 - Rejection reason
 - Upon approval, earliest free date (Sun–Thu, <15 bookings) is assigned automatically
-- Per-day limits: max 1 pending, max 2 approved
+- Per-day limits: max 1 pending, max 2 approved per user
 - /mybookings shows user's bookings
 - /cancel works anytime
 - /help shows commands
+- Uses PostgreSQL via DATABASE_URL (Railway Hobby tier safe)
 """
 
 import os
 import logging
-import sqlite3
+import psycopg2
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (
@@ -27,10 +28,10 @@ from telegram.ext import (
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_IDS_RAW = os.environ.get("ADMIN_IDS", "")
 ADMIN_IDS = [int(x.strip()) for x in ADMIN_IDS_RAW.split(",") if x.strip().isdigit()]
-DB_PATH = os.environ.get("DB_PATH", "bookings.db")
+DB_URL = os.environ.get("DATABASE_URL")
 
-if not BOT_TOKEN or not ADMIN_IDS:
-    raise RuntimeError("Please set BOT_TOKEN and ADMIN_IDS environment variables (comma-separated)")
+if not BOT_TOKEN or not ADMIN_IDS or not DB_URL:
+    raise RuntimeError("Please set BOT_TOKEN, ADMIN_IDS, and DATABASE_URL environment variables")
 
 # --- Logging ---
 logging.basicConfig(format="%(asctime)s %(levelname)s %(message)s", level=logging.INFO)
@@ -42,141 +43,153 @@ ASK_OPTION, ASK_SCHEDULER_INFO = range(2)
 # --- In-memory pending rejection map: admin_id -> booking_id ---
 pending_rejections = {}
 
-# --- Database helpers ---
+# --- PostgreSQL helpers ---
+def get_conn():
+    return psycopg2.connect(DB_URL)
+
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
         CREATE TABLE IF NOT EXISTS bookings (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL,
             username TEXT,
             option TEXT,
             scheduler_info TEXT,
             date TEXT,
             status TEXT NOT NULL,
-            created_at TEXT NOT NULL
+            created_at TIMESTAMP NOT NULL
         )
     """)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS admin_messages (
-            booking_id INTEGER,
-            admin_id INTEGER,
-            message_id INTEGER
+            booking_id INT,
+            admin_id BIGINT,
+            message_id BIGINT
         )
     """)
     conn.commit()
+    cur.close()
     conn.close()
 
 def create_booking(user_id:int, username:str, option:str, scheduler_info:str) -> int:
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
         INSERT INTO bookings (user_id, username, option, scheduler_info, date, status, created_at)
-        VALUES (?, ?, ?, ?, NULL, 'PENDING', ?)
-    """, (user_id, username, option, scheduler_info, datetime.utcnow().isoformat()))
-    booking_id = cur.lastrowid
+        VALUES (%s, %s, %s, %s, NULL, 'PENDING', NOW())
+        RETURNING id
+    """, (user_id, username, option, scheduler_info))
+    booking_id = cur.fetchone()[0]
     conn.commit()
+    cur.close()
     conn.close()
     return booking_id
 
 def save_admin_message(booking_id:int, admin_id:int, message_id:int):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     cur = conn.cursor()
-    cur.execute("INSERT INTO admin_messages (booking_id, admin_id, message_id) VALUES (?, ?, ?)", (booking_id, admin_id, message_id))
+    cur.execute("INSERT INTO admin_messages (booking_id, admin_id, message_id) VALUES (%s, %s, %s)",
+                (booking_id, admin_id, message_id))
     conn.commit()
+    cur.close()
     conn.close()
 
 def get_admin_messages(booking_id:int):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT admin_id, message_id FROM admin_messages WHERE booking_id = ?", (booking_id,))
+    cur.execute("SELECT admin_id, message_id FROM admin_messages WHERE booking_id = %s", (booking_id,))
     rows = cur.fetchall()
+    cur.close()
     conn.close()
     return rows
 
 def clear_admin_messages(booking_id:int):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     cur = conn.cursor()
-    cur.execute("DELETE FROM admin_messages WHERE booking_id = ?", (booking_id,))
+    cur.execute("DELETE FROM admin_messages WHERE booking_id = %s", (booking_id,))
     conn.commit()
+    cur.close()
     conn.close()
 
 def set_booking_status(booking_id:int, status:str):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     cur = conn.cursor()
-    cur.execute("UPDATE bookings SET status = ? WHERE id = ?", (status, booking_id))
+    cur.execute("UPDATE bookings SET status = %s WHERE id = %s", (status, booking_id))
     conn.commit()
+    cur.close()
     conn.close()
 
 def set_booking_date(booking_id:int, date_str:str):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     cur = conn.cursor()
-    cur.execute("UPDATE bookings SET date = ? WHERE id = ?", (date_str, booking_id))
+    cur.execute("UPDATE bookings SET date = %s WHERE id = %s", (date_str, booking_id))
     conn.commit()
+    cur.close()
     conn.close()
 
 def count_approved_for_date(date_str:str) -> int:
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT COUNT(*) FROM bookings WHERE date = ? AND status = 'APPROVED'", (date_str,))
-    (cnt,) = cur.fetchone()
+    cur.execute("SELECT COUNT(*) FROM bookings WHERE date = %s AND status = 'APPROVED'", (date_str,))
+    cnt = cur.fetchone()[0]
+    cur.close()
     conn.close()
     return cnt
 
 def get_booking(booking_id:int):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT id, user_id, username, option, scheduler_info, date, status FROM bookings WHERE id = ?", (booking_id,))
+    cur.execute("SELECT id, user_id, username, option, scheduler_info, date, status FROM bookings WHERE id = %s",
+                (booking_id,))
     row = cur.fetchone()
+    cur.close()
     conn.close()
     return row
 
 def get_user_bookings(user_id:int):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT id, date, status FROM bookings WHERE user_id = ? ORDER BY created_at DESC", (user_id,))
+    cur.execute("SELECT id, date, status FROM bookings WHERE user_id = %s ORDER BY created_at DESC", (user_id,))
     rows = cur.fetchall()
+    cur.close()
     conn.close()
     return rows
 
 def count_user_bookings(user_id:int, status=None):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     cur = conn.cursor()
     if status:
-        cur.execute("SELECT COUNT(*) FROM bookings WHERE user_id=? AND status=?", (user_id, status))
+        cur.execute("SELECT COUNT(*) FROM bookings WHERE user_id=%s AND status=%s", (user_id, status))
     else:
-        cur.execute("SELECT COUNT(*) FROM bookings WHERE user_id=?", (user_id,))
-    result = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM bookings WHERE user_id=%s", (user_id,))
+    cnt = cur.fetchone()[0]
+    cur.close()
     conn.close()
-    return result
+    return cnt
 
 def count_user_bookings_for_date(user_id:int, date_str:str, status=None):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     cur = conn.cursor()
     if status:
-        cur.execute("SELECT COUNT(*) FROM bookings WHERE user_id=? AND date=? AND status=?", (user_id, date_str, status))
+        cur.execute("SELECT COUNT(*) FROM bookings WHERE user_id=%s AND date=%s AND status=%s", (user_id, date_str, status))
     else:
-        cur.execute("SELECT COUNT(*) FROM bookings WHERE user_id=? AND date=?", (user_id, date_str))
-    result = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM bookings WHERE user_id=%s AND date=%s", (user_id, date_str))
+    cnt = cur.fetchone()[0]
+    cur.close()
     conn.close()
-    return result
+    return cnt
 
 def next_available_date():
     """Return the earliest Sun–Thu date starting 6 days from today with <15 approved bookings."""
     today = datetime.utcnow().date()
-
-    # Start 6 days from today
-    d = today + timedelta(days=20)
-
+    d = today + timedelta(days=23)
     while True:
-        # Sun=6, Mon=0, Tue=1, Wed=2, Thu=3
-        if d.weekday() in (6,0,1,2,3):
+        if d.weekday() in (6,0,1,2,3):  # Sun–Thu
             if count_approved_for_date(d.isoformat()) < 15:
                 return d.isoformat()
-
         d += timedelta(days=1)
-
 
 # --- Bot handlers ---
 async def set_commands(app):
@@ -190,8 +203,7 @@ async def set_commands(app):
 
 async def start(update:Update, context:ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "اهلا بك في هيئة الدواء المصرية فرع المنيا — يمكنك التقديم لحجز موعد لتقديم طلبك الأن برجاء الضغط علي زر MENU للبدء\n"
-        "برجاء الانتباه ان مقدم الطلب يجب ان يكون صاحب المؤسسة الصيدلية او موكل عنه"
+        "اهلا بك في هيئة الدواء المصرية فرع المنيا — يمكنك التقديم لحجز موعد لتقديم طلبك الأن"
     )
 
 async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -222,8 +234,6 @@ async def cancel_handler(update:Update, context:ContextTypes.DEFAULT_TYPE):
 async def schedule_start(update:Update, context:ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     user_id = update.effective_user.id
-    
-    # --- Check global limits ---
     if count_user_bookings(user_id, "PENDING") >= 1:
         await update.message.reply_text("لديك طلب واحد قيد المراجعة بالفعل — لا يمكنك تقديم طلب جديد قبل يتم مراجعته.")
         return ConversationHandler.END
@@ -251,24 +261,19 @@ async def receive_scheduler_info(update:Update, context:ContextTypes.DEFAULT_TYP
         await update.message.reply_text("برجاء إدخال نص صحيح")
         return ASK_SCHEDULER_INFO
     context.user_data['scheduler_info'] = text
-
     user = update.message.from_user
     booking_id = create_booking(user.id, user.username or "",
                                 context.user_data['option'],
                                 context.user_data['scheduler_info'])
-
     caption = (
         f"New booking #{booking_id}\n"
         f"User: {user.full_name} (@{user.username})\n"
-        f"UserID: {user.id}\n"
         f"Option: {context.user_data['option']}\n"
         f"Scheduler: {context.user_data['scheduler_info']}\n"
         f"Date: (To be assigned upon approval)"
     )
-
     keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Approve", callback_data=f"approve:{booking_id}"),
                                       InlineKeyboardButton("Reject", callback_data=f"reject:{booking_id}")]])
-
     for admin_id in ADMIN_IDS:
         try:
             msg = await context.bot.send_message(chat_id=admin_id, text=caption, reply_markup=keyboard)
@@ -301,8 +306,6 @@ async def admin_approve_reject(update:Update, context:ContextTypes.DEFAULT_TYPE)
 
     if action == "approve":
         assigned_date = next_available_date()
-
-        # --- Per-day limits ---
         if count_user_bookings_for_date(user_id, assigned_date, "PENDING") >= 1:
             await context.bot.send_message(chat_id=admin.id,
                 text=f"لا يمكن الموافقة: المستخدم لديه بالفعل حجز واحد قيد المراجعة لنفس اليوم {assigned_date}")
@@ -311,25 +314,20 @@ async def admin_approve_reject(update:Update, context:ContextTypes.DEFAULT_TYPE)
             await context.bot.send_message(chat_id=admin.id,
                 text=f"لا يمكن الموافقة: المستخدم لديه بالفعل حجزين معتمدين لنفس اليوم {assigned_date}")
             return
-
         set_booking_date(booking_id, assigned_date)
         set_booking_status(booking_id, "APPROVED")
-
         details_text = (
             f"تم حجز موعد برقم #{booking_id} وتمت الموافقة عليه بمعرفة {admin.first_name}\n"
             f"تاريخ الحجز: {assigned_date}\n"
             f"نوع الاجراء: {option}\n"
             f"مقدم الطلب: {scheduler_info}"
         )
-
         for a in ADMIN_IDS:
             await context.bot.send_message(chat_id=a, text=details_text)
-
         await context.bot.send_message(chat_id=user_id,
             text=f"تمت الموافقة على حجزك #{booking_id} لـ {assigned_date} من قبل {admin.first_name}.\n"
                  f"نوع الاجراء: {option}\nمقدم الطلب: {scheduler_info}"
         )
-
         await query.edit_message_text(f"Booking #{booking_id} APPROVED by {admin.first_name}.")
         return
 
