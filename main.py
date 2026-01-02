@@ -1,6 +1,7 @@
 """
 Telegram Scheduling Bot — PostgreSQL Version
 Features:
+- Test
 - Multi-admin approval (ADMIN_IDS env var, comma-separated)
 - Users choose option (فتح — غلق) and provide scheduler info
 - Max reservations per day = 15
