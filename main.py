@@ -1,19 +1,3 @@
-"""
-Telegram Scheduling Bot — PostgreSQL Version
-Features:
-- Multi-admin approval (ADMIN_IDS env var, comma-separated)
-- Users choose option (فتح — غلق) and provide scheduler info
-- Max reservations per day = 15
-- Admin approve / reject flow
-- Rejection reason
-- Upon approval, earliest free date (Sun–Thu, <15 bookings) is assigned automatically
-- Per-day limits: max 1 pending, max 2 approved per user
-- /mybookings shows user's bookings
-- /cancel works anytime
-- /help shows commands
-- Uses PostgreSQL via DATABASE_URL (Railway Hobby tier safe)
-"""
-
 import os
 import logging
 import psycopg2
@@ -182,7 +166,7 @@ def count_user_bookings_for_date(user_id:int, date_str:str, status=None):
     return cnt
 
 def next_available_date():
-    """Return the earliest Sun–Thu date starting 6 days from today with <15 approved bookings."""
+    """Return the earliest Sun–Thu date starting 25 days from today (as per original code logic) with <15 approved bookings."""
     today = datetime.utcnow().date()
     d = today + timedelta(days=25)
     while True:
@@ -232,21 +216,16 @@ async def cancel_handler(update:Update, context:ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 async def schedule_start(update:Update, context:ContextTypes.DEFAULT_TYPE):
-    context.user_data.clear()
-    user_id = update.effective_user.id
-    if count_user_bookings(user_id, "PENDING") >= 1:
-        await update.message.reply_text("لديك طلب واحد قيد المراجعة بالفعل — لا يمكنك تقديم طلب جديد قبل يتم مراجعته.")
-        return ConversationHandler.END
-    if count_user_bookings(user_id, "APPROVED") >= 2:
-        await update.message.reply_text("لديك بالفعل حجزان تمت الموافقة عليهما — لا يمكنك إضافة المزيد حتى انتهاء موعد منهما.")
-        return ConversationHandler.END
-
-    keyboard = [
-        [InlineKeyboardButton("فتح منشأة صيدلية", callback_data="option:فتح")],
-        [InlineKeyboardButton("غلق منشأة صيدلية", callback_data="option:غلق")],
-    ]
-    await update.message.reply_text("برجاء اختيار نوع الحجز:", reply_markup=InlineKeyboardMarkup(keyboard))
-    return ASK_OPTION
+    """
+    Modified to stop new bookings and show the 'fully booked' message.
+    """
+    closing_message = (
+        "عفواو نظرا لاكتمال الحجز حتى 17/2/2026 فقد توقف الحجز علي الموقع "
+        "ويتم الدخول بأسبقية التواجد بالمقر اعتباراً من بداية شهر رمضان الكريم "
+        "وكل عام وحضراتكم بخير"
+    )
+    await update.message.reply_text(closing_message)
+    return ConversationHandler.END
 
 async def receive_option(update:Update, context:ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -260,16 +239,15 @@ async def receive_scheduler_info(update:Update, context:ContextTypes.DEFAULT_TYP
     if not text:
         await update.message.reply_text("برجاء إدخال نص صحيح")
         return ASK_SCHEDULER_INFO
-    context.user_data['scheduler_info'] = text
     user = update.message.from_user
     booking_id = create_booking(user.id, user.username or "",
                                 context.user_data['option'],
-                                context.user_data['scheduler_info'])
+                                text)
     caption = (
         f"New booking #{booking_id}\n"
         f"User: {user.full_name} (@{user.username})\n"
         f"Option: {context.user_data['option']}\n"
-        f"Scheduler: {context.user_data['scheduler_info']}\n"
+        f"Scheduler: {text}\n"
         f"Date: (To be assigned upon approval)"
     )
     keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Approve", callback_data=f"approve:{booking_id}"),
@@ -296,7 +274,6 @@ async def admin_approve_reject(update:Update, context:ContextTypes.DEFAULT_TYPE)
         return
     _, user_id, username, option, scheduler_info, date_str, status = booking
 
-    # Remove buttons for all admins
     for a_id, msg_id in get_admin_messages(booking_id):
         try:
             await context.bot.edit_message_reply_markup(chat_id=a_id, message_id=msg_id, reply_markup=None)
@@ -306,14 +283,6 @@ async def admin_approve_reject(update:Update, context:ContextTypes.DEFAULT_TYPE)
 
     if action == "approve":
         assigned_date = next_available_date()
-        if count_user_bookings_for_date(user_id, assigned_date, "PENDING") >= 1:
-            await context.bot.send_message(chat_id=admin.id,
-                text=f"لا يمكن الموافقة: المستخدم لديه بالفعل حجز واحد قيد المراجعة لنفس اليوم {assigned_date}")
-            return
-        if count_user_bookings_for_date(user_id, assigned_date, "APPROVED") >= 2:
-            await context.bot.send_message(chat_id=admin.id,
-                text=f"لا يمكن الموافقة: المستخدم لديه بالفعل حجزين معتمدين لنفس اليوم {assigned_date}")
-            return
         set_booking_date(booking_id, assigned_date)
         set_booking_status(booking_id, "APPROVED")
         details_text = (
