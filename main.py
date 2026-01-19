@@ -187,7 +187,7 @@ async def set_commands(app):
 
 async def start(update:Update, context:ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "اهلا بك في هيئة الدواء المصرية فرع المنيا — يمكنك التقديم لحجز موعد لتقديم طلبك الأن"
+        "عفواو نظرا لاكتمال الحجز حتى 17/2/2026 فقد توقف الحجز علي الموقع ويتم الدخول بأسبقية التواجد بالمقر اعتباراً من بداية شهر رمضان الكريم وكل عام وحضراتكم بخير"
     )
 
 async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -220,7 +220,7 @@ async def schedule_start(update:Update, context:ContextTypes.DEFAULT_TYPE):
     Modified to stop new bookings and show the 'fully booked' message.
     """
     closing_message = (
-        "عفواو نظرا لاكتمال الحجز حتى 17/2/2026 فقد توقف الحجز علي الموقع "
+        "عفوا, نظرا لاكتمال الحجز حتى 17/2/2026 فقد توقف الحجز علي الموقع "
         "ويتم الدخول بأسبقية التواجد بالمقر اعتباراً من بداية شهر رمضان الكريم "
         "وكل عام وحضراتكم بخير"
     )
